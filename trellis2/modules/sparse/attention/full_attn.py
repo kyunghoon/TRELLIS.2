@@ -211,6 +211,23 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             max_q_seqlen = max(q_seqlen)
             max_kv_seqlen = max(kv_seqlen)
         out = flash_attn_3.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_q_seqlen, max_kv_seqlen)
+    elif config.ATTN == 'flex_gemm':
+        # Fused Metal varlen attention (mtlgemm). q/k/v are already packed
+        # [T, H, C]; only cu_seqlens need to be built. Supports fp32/fp16/bf16.
+        if 'flex_gemm' not in globals():
+            import flex_gemm
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        cu_seqlens_q = torch.cat([torch.zeros(1, dtype=torch.int32, device=device),
+                                  torch.cumsum(torch.tensor(q_seqlen, dtype=torch.int32), dim=0).to(device)]).int()
+        cu_seqlens_kv = torch.cat([torch.zeros(1, dtype=torch.int32, device=device),
+                                   torch.cumsum(torch.tensor(kv_seqlen, dtype=torch.int32), dim=0).to(device)]).int()
+        out = flex_gemm.kernels.cuda.sparse_attention_fwd(
+            q, k, v, cu_seqlens_q, cu_seqlens_kv,
+            max(q_seqlen), max(kv_seqlen), q.shape[-1] ** -0.5,
+        )
     elif config.ATTN in ('sdpa', 'naive'):
         from torch.nn.functional import scaled_dot_product_attention as sdpa_fn
         if num_all_args == 1:
